@@ -3,6 +3,20 @@ if status is-interactive
     # No greeting
     set fish_greeting
 
+    # Homebrew
+    if test -d /home/linuxbrew/.linuxbrew
+        set -gx HOMEBREW_PREFIX "/home/linuxbrew/.linuxbrew"
+        set -gx HOMEBREW_CELLAR "/home/linuxbrew/.linuxbrew/Cellar"
+        set -gx HOMEBREW_REPOSITORY "/home/linuxbrew/.linuxbrew/Homebrew"
+        fish_add_path -gP "/home/linuxbrew/.linuxbrew/bin" "/home/linuxbrew/.linuxbrew/sbin"
+        if test -d (brew --prefix)"/share/fish/completions"
+            set -p fish_complete_path (brew --prefix)/share/fish/completions
+        end
+        if test -d (brew --prefix)"/share/fish/vendor_completions.d"
+            set -p fish_complete_path (brew --prefix)/share/fish/vendor_completions.d
+        end
+    end
+
     # Use starship
     function starship_transient_prompt_func
         starship module character
