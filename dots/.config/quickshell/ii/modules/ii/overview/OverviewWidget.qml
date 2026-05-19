@@ -18,8 +18,21 @@ Item {
     readonly property var toplevels: ToplevelManager.toplevels
     // Clamp to avoid lock-screen temp workspace (2147483647 - N) leaking into UI
     readonly property int effectiveActiveWorkspaceId: Math.max(1, Math.min(100, monitor?.activeWorkspace?.id ?? 1))
-    readonly property int workspacesShown: Config.options.overview.rows * Config.options.overview.columns
-    readonly property int workspaceGroup: Math.floor((effectiveActiveWorkspaceId - 1) / workspacesShown)
+    // Dynamic: only show workspaces that actually exist on this monitor
+    readonly property var visibleWorkspaces: {
+        const ids = Hyprland.workspaces.values
+            .filter(ws => ws.id > 0 && ws.id <= 100 && (!ws.monitor || ws.monitor.name == root.monitor?.name))
+            .map(ws => ws.id)
+            .sort((a, b) => a - b);
+        // Always include the active workspace so the indicator has somewhere to land
+        if (ids.indexOf(effectiveActiveWorkspaceId) === -1) ids.push(effectiveActiveWorkspaceId);
+        ids.sort((a, b) => a - b);
+        return ids;
+    }
+    readonly property int workspacesShown: Math.max(1, visibleWorkspaces.length)
+    readonly property int dynColumns: Math.max(1, Math.min(workspacesShown, Config.options.overview.columns))
+    readonly property int dynRows: Math.max(1, Math.ceil(workspacesShown / dynColumns))
+    readonly property int workspaceGroup: 0
     property bool monitorIsFocused: (Hyprland.focusedMonitor?.name == monitor.name)
     property var windows: HyprlandData.windowList
     property var windowByAddress: HyprlandData.windowByAddress
@@ -53,19 +66,68 @@ Item {
     property Component windowComponent: OverviewWindow {}
     property list<OverviewWindow> windowWidgets: []
     
+    // Keyboard navigation state. Initialized to active workspace; reset when
+    // overview opens so it always starts on the current workspace.
+    property int kbFocusedIndex: Math.max(0, visibleWorkspaces.indexOf(effectiveActiveWorkspaceId))
+    Connections {
+        target: GlobalStates
+        function onOverviewOpenChanged() {
+            if (GlobalStates.overviewOpen)
+                root.kbFocusedIndex = Math.max(0, root.visibleWorkspaces.indexOf(root.effectiveActiveWorkspaceId));
+        }
+    }
+
+    function moveFocus(dx, dy) {
+        const total = root.visibleWorkspaces.length;
+        if (total === 0) return;
+        var idx = root.kbFocusedIndex + dx + dy * root.dynColumns;
+        if (idx < 0) idx = 0;
+        if (idx >= total) idx = total - 1;
+        root.kbFocusedIndex = idx;
+    }
+    function activateFocused() {
+        const ws = root.visibleWorkspaces[root.kbFocusedIndex];
+        if (!ws) return;
+        GlobalStates.overviewOpen = false;
+        selectWorkspace(ws);
+    }
+
+    // Focus a workspace. If it lives on a different monitor than the focused
+    // one, swap the two monitors' active workspaces so the selected workspace
+    // appears on the user's current monitor.
+    function selectWorkspace(wsId) {
+        const wsObj = Hyprland.workspaces.values.find(w => w.id === wsId);
+        const otherMon = wsObj?.monitor;
+        const focusedMon = Hyprland.focusedMonitor;
+        if (otherMon && focusedMon && otherMon.id !== focusedMon.id) {
+            Hyprland.dispatch(`hl.dsp.workspace.swap_monitors({ monitor1 = "${focusedMon.name}", monitor2 = "${otherMon.name}" })`);
+        } else {
+            Hyprland.dispatch(`hl.dsp.focus({ workspace = ${wsId} })`);
+        }
+    }
+
+    function getWsIndex(ws) {
+        return root.visibleWorkspaces.indexOf(ws);
+    }
     function getWsRow(ws) {
-        // 1-indexed workspace, 0-indexed row
-        var normalRow = Math.floor((ws - 1) / Config.options.overview.columns) % Config.options.overview.rows;
-        return (Config.options.overview.orderBottomUp ? Config.options.overview.rows - normalRow - 1 : normalRow);
+        var idx = getWsIndex(ws);
+        if (idx < 0) return 0;
+        var normalRow = Math.floor(idx / root.dynColumns);
+        return (Config.options.overview.orderBottomUp ? root.dynRows - normalRow - 1 : normalRow);
     }
     function getWsColumn(ws) {
-        // 1-indexed workspace, 0-indexed column
-        var normalCol = (ws - 1) % Config.options.overview.columns;
-        return (Config.options.overview.orderRightLeft ? Config.options.overview.columns - normalCol - 1 : normalCol);
+        var idx = getWsIndex(ws);
+        if (idx < 0) return 0;
+        var normalCol = idx % root.dynColumns;
+        return (Config.options.overview.orderRightLeft ? root.dynColumns - normalCol - 1 : normalCol);
     }
     function getWsInCell(ri, ci) {
-        // 1-indexed workspace, 0-indexed row and column index
-        return (Config.options.overview.orderBottomUp ? Config.options.overview.rows - ri - 1 : ri) * Config.options.overview.columns + (Config.options.overview.orderRightLeft ? Config.options.overview.columns - ci - 1 : ci) + 1
+        // Returns workspace ID at the (row, column) cell, or -1 if no workspace there
+        var normalRow = (Config.options.overview.orderBottomUp ? root.dynRows - ri - 1 : ri);
+        var normalCol = (Config.options.overview.orderRightLeft ? root.dynColumns - ci - 1 : ci);
+        var idx = normalRow * root.dynColumns + normalCol;
+        if (idx < 0 || idx >= root.visibleWorkspaces.length) return -1;
+        return root.visibleWorkspaces[idx];
     }
 
     StyledRectangularShadow {
@@ -90,19 +152,20 @@ Item {
             spacing: workspaceSpacing
             
             Repeater {
-                model: Config.options.overview.rows
+                model: root.dynRows
                 delegate: Row {
                     id: row
                     required property int index
                     spacing: workspaceSpacing
 
                     Repeater { // Workspace repeater
-                        model: Config.options.overview.columns
+                        model: root.dynColumns
                         Rectangle { // Workspace
                             id: workspace
                             required property int index
                             property int colIndex: index
-                            property int workspaceValue: root.workspaceGroup * root.workspacesShown + getWsInCell(row.index, colIndex)
+                            property int workspaceValue: getWsInCell(row.index, colIndex)
+                            visible: workspaceValue > 0
                             property color defaultWorkspaceColor: Appearance.colors.colSurfaceContainerLow
                             property color hoveredWorkspaceColor: ColorUtils.mix(defaultWorkspaceColor, Appearance.colors.colLayer1Hover, 0.1)
                             property color hoveredBorderColor: Appearance.colors.colLayer2Hover
@@ -112,9 +175,9 @@ Item {
                             implicitHeight: root.workspaceImplicitHeight
                             color: hoveredWhileDragging ? hoveredWorkspaceColor : defaultWorkspaceColor
                             property bool workspaceAtLeft: colIndex === 0
-                            property bool workspaceAtRight: colIndex === Config.options.overview.columns - 1
+                            property bool workspaceAtRight: colIndex === root.dynColumns - 1
                             property bool workspaceAtTop: row.index === 0
-                            property bool workspaceAtBottom: row.index === Config.options.overview.rows - 1
+                            property bool workspaceAtBottom: row.index === root.dynRows - 1
                             topLeftRadius: (workspaceAtLeft && workspaceAtTop) ? root.largeWorkspaceRadius : root.smallWorkspaceRadius
                             topRightRadius: (workspaceAtRight && workspaceAtTop) ? root.largeWorkspaceRadius : root.smallWorkspaceRadius
                             bottomLeftRadius: (workspaceAtLeft && workspaceAtBottom) ? root.largeWorkspaceRadius : root.smallWorkspaceRadius
@@ -142,7 +205,7 @@ Item {
                                 onPressed: {
                                     if (root.draggingTargetWorkspace === -1) {
                                         GlobalStates.overviewOpen = false
-                                        Hyprland.dispatch(`hl.dsp.focus({ workspace = ${workspace.workspaceValue} })`)
+                                        root.selectWorkspace(workspace.workspaceValue)
                                     }
                                 }
                             }
@@ -175,12 +238,10 @@ Item {
             Repeater { // Window repeater
                 model: ScriptModel {
                     values: {
-                        // console.log(JSON.stringify(ToplevelManager.toplevels.values.map(t => t), null, 2))
                         return ToplevelManager.toplevels.values.filter((toplevel) => {
                             const address = `0x${toplevel.HyprlandToplevel?.address}`
                             var win = windowByAddress[address]
-                            const inWorkspaceGroup = (root.workspaceGroup * root.workspacesShown < win?.workspace?.id && win?.workspace?.id <= (root.workspaceGroup + 1) * root.workspacesShown)
-                            return inWorkspaceGroup;
+                            return root.visibleWorkspaces.indexOf(win?.workspace?.id) !== -1;
                         })
                     }
                 }
@@ -209,9 +270,9 @@ Item {
                     // Radius
                     property real minRadius: Appearance.rounding.small
                     property bool workspaceAtLeft: workspaceColIndex === 0
-                    property bool workspaceAtRight: workspaceColIndex === Config.options.overview.columns - 1
+                    property bool workspaceAtRight: workspaceColIndex === root.dynColumns - 1
                     property bool workspaceAtTop: workspaceRowIndex === 0
-                    property bool workspaceAtBottom: workspaceRowIndex === Config.options.overview.rows - 1
+                    property bool workspaceAtBottom: workspaceRowIndex === root.dynRows - 1
                     property bool workspaceAtTopLeft: (workspaceAtLeft && workspaceAtTop) 
                     property bool workspaceAtTopRight: (workspaceAtRight && workspaceAtTop) 
                     property bool workspaceAtBottomLeft: (workspaceAtLeft && workspaceAtBottom) 
@@ -301,10 +362,34 @@ Item {
                 }
             }
 
+            Rectangle { // Keyboard-focused workspace indicator (for arrow nav)
+                id: kbFocusedIndicator
+                property int kbWs: root.visibleWorkspaces[root.kbFocusedIndex] ?? -1
+                visible: kbWs > 0 && kbWs !== root.effectiveActiveWorkspaceId
+                property int rowIndex: getWsRow(kbWs)
+                property int colIndex: getWsColumn(kbWs)
+                x: (root.workspaceImplicitWidth + workspaceSpacing) * colIndex
+                y: (root.workspaceImplicitHeight + workspaceSpacing) * rowIndex
+                z: root.windowZ
+                width: root.workspaceImplicitWidth
+                height: root.workspaceImplicitHeight
+                color: "transparent"
+                radius: root.smallWorkspaceRadius
+                border.width: 2
+                border.color: Appearance.colors.colPrimary
+                Behavior on x {
+                    animation: Appearance.animation.elementMoveFast.numberAnimation.createObject(this)
+                }
+                Behavior on y {
+                    animation: Appearance.animation.elementMoveFast.numberAnimation.createObject(this)
+                }
+            }
+
             Rectangle { // Focused workspace indicator
                 id: focusedWorkspaceIndicator
                 property int rowIndex: getWsRow(root.effectiveActiveWorkspaceId)
                 property int colIndex: getWsColumn(root.effectiveActiveWorkspaceId)
+                visible: root.visibleWorkspaces.indexOf(root.effectiveActiveWorkspaceId) !== -1
                 x: (root.workspaceImplicitWidth + workspaceSpacing) * colIndex
                 y: (root.workspaceImplicitHeight + workspaceSpacing) * rowIndex
                 z: root.windowZ
@@ -312,9 +397,9 @@ Item {
                 height: root.workspaceImplicitHeight
                 color: "transparent"
                 property bool workspaceAtLeft: colIndex === 0
-                property bool workspaceAtRight: colIndex === Config.options.overview.columns - 1
+                property bool workspaceAtRight: colIndex === root.dynColumns - 1
                 property bool workspaceAtTop: rowIndex === 0
-                property bool workspaceAtBottom: rowIndex === Config.options.overview.rows - 1
+                property bool workspaceAtBottom: rowIndex === root.dynRows - 1
                 topLeftRadius: (workspaceAtLeft && workspaceAtTop) ? root.largeWorkspaceRadius : root.smallWorkspaceRadius
                 topRightRadius: (workspaceAtRight && workspaceAtTop) ? root.largeWorkspaceRadius : root.smallWorkspaceRadius
                 bottomLeftRadius: (workspaceAtLeft && workspaceAtBottom) ? root.largeWorkspaceRadius : root.smallWorkspaceRadius

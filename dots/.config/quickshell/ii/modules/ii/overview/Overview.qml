@@ -15,6 +15,11 @@ Scope {
     id: overviewScope
     property bool dontAutoCancelSearch: false
 
+    // Defensive: ensure the overview is closed on quickshell startup so a stale
+    // singleton state (or restart triggered with overview mid-toggle) can't
+    // leave the layer surface stuck capturing input across the screen.
+    Component.onCompleted: GlobalStates.overviewOpen = false
+
     PanelWindow {
         id: panelWindow
         property string searchingText: ""
@@ -27,9 +32,12 @@ Scope {
         WlrLayershell.keyboardFocus: GlobalStates.overviewOpen ? WlrKeyboardFocus.OnDemand : WlrKeyboardFocus.None
         color: "transparent"
 
+        // Explicit empty-region fallback when closed avoids ambiguous null-mask
+        // semantics where the whole surface ends up capturing pointer events.
         mask: Region {
-            item: GlobalStates.overviewOpen ? columnLayout : null
+            item: GlobalStates.overviewOpen ? columnLayout : emptyMaskItem
         }
+        Item { id: emptyMaskItem; width: 0; height: 0 }
 
         anchors {
             top: true
@@ -80,6 +88,20 @@ Scope {
             Keys.onPressed: event => {
                 if (event.key === Qt.Key_Escape) {
                     GlobalStates.overviewOpen = false;
+                    event.accepted = true;
+                    return;
+                }
+                // Let the search widget handle keys when there's search text
+                if (panelWindow.searchingText != "") return;
+                const widget = overviewLoader.item;
+                if (!widget) return;
+                if (event.key === Qt.Key_Left)  { widget.moveFocus(-1, 0); event.accepted = true; }
+                else if (event.key === Qt.Key_Right) { widget.moveFocus(1, 0); event.accepted = true; }
+                else if (event.key === Qt.Key_Up)    { widget.moveFocus(0, -1); event.accepted = true; }
+                else if (event.key === Qt.Key_Down)  { widget.moveFocus(0, 1); event.accepted = true; }
+                else if (event.key === Qt.Key_Return || event.key === Qt.Key_Enter) {
+                    widget.activateFocused();
+                    event.accepted = true;
                 }
             }
 
