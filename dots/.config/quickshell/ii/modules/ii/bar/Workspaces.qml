@@ -19,10 +19,28 @@ Item {
     readonly property HyprlandMonitor monitor: Hyprland.monitorFor(root.QsWindow.window?.screen)
     readonly property Toplevel activeWindow: ToplevelManager.activeToplevel
     readonly property int effectiveActiveWorkspaceId: monitor?.activeWorkspace?.id ?? 1
-    
-    readonly property int workspacesShown: Config.options.bar.workspaces.shown
-    readonly property int workspaceGroup: Math.floor((effectiveActiveWorkspaceId - 1) / root.workspacesShown)
-    property list<bool> workspaceOccupied: []
+
+    // Dynamic per-monitor workspace list: every live workspace currently bound
+    // to this monitor, sorted by id. Special workspaces (id < 0) are excluded.
+    // `Hyprland.workspaces` is reactive, so this binding re-evaluates on
+    // create/destroy/move events.
+    readonly property var monitorWorkspaces: {
+        const mid = root.monitor?.id ?? -1;
+        return Hyprland.workspaces.values
+            .filter(ws => ws.id >= 1 && ws.monitor?.id === mid)
+            .sort((a, b) => a.id - b.id);
+    }
+    readonly property int workspacesShown: Math.max(1, root.monitorWorkspaces.length)
+    // Position of the focused workspace within the filtered list, for the
+    // active-pill animation. -1 means the active ws isn't on this monitor
+    // (e.g. transiently during a monitor swap) — the pill hides in that case.
+    readonly property int activeWorkspaceIndex: {
+        const list = root.monitorWorkspaces;
+        for (let i = 0; i < list.length; ++i) {
+            if (list[i].id === root.effectiveActiveWorkspaceId) return i;
+        }
+        return -1;
+    }
     property int widgetPadding: 4
     property int workspaceButtonWidth: 26
     property real activeWorkspaceMargin: 2
@@ -30,7 +48,6 @@ Item {
     property real workspaceIconSizeShrinked: workspaceButtonWidth * 0.55
     property real workspaceIconOpacityShrinked: 1
     property real workspaceIconMarginShrinked: -4
-    property int workspaceIndexInGroup: (effectiveActiveWorkspaceId - 1) % root.workspacesShown
 
     property bool showNumbers: false
     Timer {
@@ -56,30 +73,8 @@ Item {
         }
     }
 
-    // Function to update workspaceOccupied
-    function updateWorkspaceOccupied() {
-        workspaceOccupied = Array.from({ length: root.workspacesShown }, (_, i) => {
-            return Hyprland.workspaces.values.some(ws => ws.id === workspaceGroup * root.workspacesShown + i + 1);
-        })
-    }
-
-    // Occupied workspace updates
-    Component.onCompleted: updateWorkspaceOccupied()
-    Connections {
-        target: Hyprland.workspaces
-        function onValuesChanged() {
-            updateWorkspaceOccupied();
-        }
-    }
-    Connections {
-        target: Hyprland
-        function onFocusedWorkspaceChanged() {
-            updateWorkspaceOccupied();
-        }
-    }
-    onWorkspaceGroupChanged: {
-        updateWorkspaceOccupied();
-    }
+    // Occupancy detection is per-button against HyprlandData.windowList,
+    // which already refreshes on Hyprland.onRawEvent. No precompute needed.
 
     implicitWidth: root.vertical ? Appearance.sizes.verticalBarWidth : (root.workspaceButtonWidth * root.workspacesShown)
     implicitHeight: root.vertical ? (root.workspaceButtonWidth * root.workspacesShown) : Appearance.sizes.barHeight
@@ -105,26 +100,30 @@ Item {
         }
     }
 
-    // Workspaces - background
+    // Workspaces - background (occupied highlight, merges visually adjacent)
     Grid {
         z: 1
         anchors.centerIn: parent
 
         rowSpacing: 0
         columnSpacing: 0
-        columns: root.vertical ? 1 : root.workspacesShown
-        rows: root.vertical ? root.workspacesShown : 1
+        columns: root.vertical ? 1 : root.monitorWorkspaces.length
+        rows: root.vertical ? root.monitorWorkspaces.length : 1
 
         Repeater {
-            model: root.workspacesShown
+            model: root.monitorWorkspaces
 
             Rectangle {
                 z: 1
                 implicitWidth: workspaceButtonWidth
                 implicitHeight: workspaceButtonWidth
                 radius: (width / 2)
-                property var previousOccupied: (workspaceOccupied[index-1] && !(!activeWindow?.activated && root.effectiveActiveWorkspaceId === index))
-                property var rightOccupied: (workspaceOccupied[index+1] && !(!activeWindow?.activated && root.effectiveActiveWorkspaceId === index+2))
+                property int wsId: modelData?.id ?? -1
+                property var prevWs: (index > 0) ? root.monitorWorkspaces[index - 1] : null
+                property var nextWs: (index < root.monitorWorkspaces.length - 1) ? root.monitorWorkspaces[index + 1] : null
+                property bool wsOccupied: HyprlandData.windowList.some(w => w.workspace.id === wsId)
+                property bool previousOccupied: prevWs && HyprlandData.windowList.some(w => w.workspace.id === prevWs.id) && !(!activeWindow?.activated && root.effectiveActiveWorkspaceId === prevWs.id)
+                property bool rightOccupied: nextWs && HyprlandData.windowList.some(w => w.workspace.id === nextWs.id) && !(!activeWindow?.activated && root.effectiveActiveWorkspaceId === nextWs.id)
                 property var radiusPrev: previousOccupied ? 0 : (width / 2)
                 property var radiusNext: rightOccupied ? 0 : (width / 2)
 
@@ -132,9 +131,9 @@ Item {
                 bottomLeftRadius: root.vertical ? radiusNext : radiusPrev
                 topRightRadius: root.vertical ? radiusPrev : radiusNext
                 bottomRightRadius: radiusNext
-                
+
                 color: ColorUtils.transparentize(Appearance.m3colors.m3secondaryContainer, 0.4)
-                opacity: (workspaceOccupied[index] && !(!activeWindow?.activated && root.effectiveActiveWorkspaceId === index+1)) ? 1 : 0
+                opacity: (wsOccupied && !(!activeWindow?.activated && root.effectiveActiveWorkspaceId === wsId)) ? 1 : 0
 
                 Behavior on opacity {
                     animation: Appearance.animation.elementMove.numberAnimation.createObject(this)
@@ -159,6 +158,7 @@ Item {
         // Make active ws indicator, which has a brighter color, smaller to look like it is of the same size as ws occupied highlight
         radius: Appearance.rounding.full
         color: Appearance.colors.colPrimary
+        visible: root.activeWorkspaceIndex >= 0
 
         anchors {
             verticalCenter: vertical ? undefined : parent.verticalCenter
@@ -167,7 +167,7 @@ Item {
 
         AnimatedTabIndexPair {
             id: idxPair
-            index: root.workspaceIndexInGroup
+            index: Math.max(0, root.activeWorkspaceIndex)
         }
         property real indicatorPosition: Math.min(idxPair.idx1, idxPair.idx2) * workspaceButtonWidth + root.activeWorkspaceMargin
         property real indicatorLength: Math.abs(idxPair.idx1 - idxPair.idx2) * workspaceButtonWidth + workspaceButtonWidth - root.activeWorkspaceMargin * 2
@@ -184,19 +184,19 @@ Item {
     Grid {
         z: 3
 
-        columns: root.vertical ? 1 : root.workspacesShown
-        rows: root.vertical ? root.workspacesShown : 1
+        columns: root.vertical ? 1 : root.monitorWorkspaces.length
+        rows: root.vertical ? root.monitorWorkspaces.length : 1
         columnSpacing: 0
         rowSpacing: 0
 
         anchors.fill: parent
 
         Repeater {
-            model: root.workspacesShown
+            model: root.monitorWorkspaces
 
             Button {
                 id: button
-                property int workspaceValue: workspaceGroup * root.workspacesShown + index + 1
+                property int workspaceValue: modelData?.id ?? 0
                 implicitHeight: vertical ? Appearance.sizes.verticalBarWidth : Appearance.sizes.barHeight
                 implicitWidth: vertical ? Appearance.sizes.verticalBarWidth : Appearance.sizes.verticalBarWidth
                 onPressed: Hyprland.dispatch(`hl.dsp.focus({ workspace = ${workspaceValue}})`)
@@ -209,6 +209,7 @@ Item {
                     implicitHeight: workspaceButtonWidth
                     property var biggestWindow: HyprlandData.biggestWindowForWorkspace(button.workspaceValue)
                     property var mainAppIconSource: Quickshell.iconPath(AppSearch.guessIcon(biggestWindow?.class), "image-missing")
+                    property bool wsOccupied: HyprlandData.windowList.some(w => w.workspace.id === button.workspaceValue)
 
                     StyledText { // Workspace number text
                         opacity: root.showNumbers
@@ -226,9 +227,9 @@ Item {
                         }
                         text: Config.options?.bar.workspaces.numberMap[button.workspaceValue - 1] || button.workspaceValue
                         elide: Text.ElideRight
-                        color: (root.effectiveActiveWorkspaceId == button.workspaceValue) ? 
-                            Appearance.m3colors.m3onPrimary : 
-                            (workspaceOccupied[index] ? Appearance.m3colors.m3onSecondaryContainer : 
+                        color: (root.effectiveActiveWorkspaceId == button.workspaceValue) ?
+                            Appearance.m3colors.m3onPrimary :
+                            (workspaceButtonBackground.wsOccupied ? Appearance.m3colors.m3onSecondaryContainer :
                                 Appearance.colors.colOnLayer1Inactive)
 
                         Behavior on opacity {
@@ -246,9 +247,9 @@ Item {
                         width: workspaceButtonWidth * 0.18
                         height: width
                         radius: width / 2
-                        color: (root.effectiveActiveWorkspaceId == button.workspaceValue) ? 
-                            Appearance.m3colors.m3onPrimary : 
-                            (workspaceOccupied[index] ? Appearance.m3colors.m3onSecondaryContainer : 
+                        color: (root.effectiveActiveWorkspaceId == button.workspaceValue) ?
+                            Appearance.m3colors.m3onPrimary :
+                            (workspaceButtonBackground.wsOccupied ? Appearance.m3colors.m3onSecondaryContainer :
                                 Appearance.colors.colOnLayer1Inactive)
 
                         Behavior on opacity {
