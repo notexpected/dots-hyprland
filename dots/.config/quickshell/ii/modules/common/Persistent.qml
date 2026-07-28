@@ -84,7 +84,7 @@ Singleton {
             }
 
             property JsonObject overlay: JsonObject {
-                property list<string> open: ["crosshair", "recorder", "volumeMixer", "resources"]
+                property list<string> open: ["crosshair", "recorder", "volumeMixer", "resources", "office"]
                 property JsonObject crosshair: JsonObject {
                     property bool pinned: false
                     property bool clickthrough: true
@@ -142,6 +142,14 @@ Singleton {
                     property real y: 42
                     property real width: 460
                     property real height: 330
+                }
+                property JsonObject office: JsonObject {
+                    property bool pinned: false
+                    property bool clickthrough: false
+                    property real x: 1450
+                    property real y: 120
+                    property real width: 360
+                    property real height: 560
                 }
             }
 

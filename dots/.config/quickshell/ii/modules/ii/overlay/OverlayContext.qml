@@ -15,6 +15,7 @@ Singleton {
         { identifier: "resources", materialSymbol: "browse_activity" },
         { identifier: "notes", materialSymbol: "note_stack" },
         { identifier: "volumeMixer", materialSymbol: "volume_up" },
+        { identifier: "office", materialSymbol: "meeting_room" },
     ]
     
     readonly property bool hasPinnedWidgets: root.pinnedWidgetIdentifiers.length > 0
